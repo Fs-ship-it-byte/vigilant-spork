@@ -186,7 +186,9 @@ function resultados(html) {
 async function buscarTitulo(titulo, trace) {
   const consulta = encodeURIComponent(titulo).replace(/%20/g, '+');
   for (const ruta of [`${BASE}/resultados.php?buscar=${consulta}`, `${BASE}/resultados/buscar=${encodeURIComponent(titulo)}/`]) {
-    const lista = resultados(await texto(ruta, {}, trace));
+    const html = await texto(ruta, {}, trace);
+    const lista = resultados(html);
+    if (trace && html) trace.push(`  ↳ ${(html.length / 1024).toFixed(0)}KB, ${lista.length} resultado(s) reconocidos${lista.length ? ': ' + lista.slice(0, 4).map((x) => x.nombre).join(' | ') : ''}`);
     if (lista.length) return lista;
   }
   return [];
@@ -218,6 +220,7 @@ async function buscar(titulos, tipo, episodio, trace) {
         mejor = r.url;
       }
     }
+    if (trace) trace.push(`  ↳ mejor coincidencia para "${titulo}": ${mejor ? corta(mejor) : 'ninguna'} (puntaje ${puntos.toFixed(2)}, mínimo 0.80)`);
     if (!mejor || puntos < 0.8) continue;
     if (tipo === 'movie') return mejor;
     const ficha = await texto(mejor, {}, trace);
@@ -272,4 +275,20 @@ async function getStreams(id, mediaType, season, episode, trace) {
   }
 }
 
-module.exports = { getStreams, FUENTE };
+async function diagnosticoBusqueda(q) {
+  const trace = [];
+  const url = `${BASE}/resultados.php?buscar=${encodeURIComponent(q).replace(/%20/g, '+')}`;
+  const r = await pedir(url, {}, trace);
+  const html = r && r.ok ? await r.text() : '';
+  return {
+    status: r ? r.status : 0,
+    bytes: html.length,
+    reconocidos: resultados(html).slice(0, 15),
+    enlaces: (html.match(/href=["'][^"']*(?:player|ver\.php|video|serie)[^"']*["']/gi) || []).slice(0, 15),
+    encabezados: (html.match(/<h[1-4][^>]*>[\s\S]{0,160}/gi) || []).slice(0, 8).map((x) => x.replace(/\s+/g, ' ')),
+    muestra: limpiarHtml(html.slice(0, 4000)).slice(0, 400),
+    trace
+  };
+}
+
+module.exports = { getStreams, diagnosticoBusqueda, FUENTE };

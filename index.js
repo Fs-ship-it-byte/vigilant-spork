@@ -89,6 +89,11 @@ proxy.registrar(app);
 app.get('/health', (req, res) => res.send('ok'));
 
 if (ENABLE_DEBUG) {
+  // /debug/search?q=amazonas  → qué devuelve el buscador del sitio y qué reconoce el scraper
+  app.get('/debug/search', async (req, res) => {
+    res.json(await area.diagnosticoBusqueda(String(req.query.q || '')));
+  });
+
   // /debug/streams?type=movie&id=tt0111161  |  /debug/streams?type=series&id=tt0903747:1:1
   app.get('/debug/streams', async (req, res) => {
     const t0 = Date.now();
