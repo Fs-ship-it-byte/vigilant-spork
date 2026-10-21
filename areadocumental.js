@@ -140,27 +140,38 @@ async function datosTmdb(id, tipo, trace) {
     if (!r || !r[0]) return null;
     tmdb = String(r[0].id);
   }
-  const ruta = `https://api.themoviedb.org/3/${tipo}/${tmdb}?api_key=${TMDB_KEY}`;
-  const [es, en] = await Promise.all([json(`${ruta}&language=es-MX`, trace), json(`${ruta}&language=en-US`, trace)]);
+  const raiz = `https://api.themoviedb.org/3/${tipo}/${tmdb}`;
+  const ruta = `${raiz}?api_key=${TMDB_KEY}`;
+  const [es, en, ese, alt] = await Promise.all([
+    json(`${ruta}&language=es-MX`, trace),
+    json(`${ruta}&language=en-US`, trace),
+    json(`${ruta}&language=es-ES`, trace),
+    json(`${raiz}/alternative_titles?api_key=${TMDB_KEY}`, trace)
+  ]);
   if (!es && !en) return null;
   const a = es || {};
   const b = en || {};
+  const c = ese || {};
+  const paises = new Set(['ES', 'MX', 'AR', 'CO', 'CL', 'PE', 'VE', 'UY', 'EC']);
+  const alternos = ((alt && (alt.titles || alt.results)) || []).filter((x) => paises.has(x.iso_3166_1)).map((x) => x.title).slice(0, 4);
   return {
     titulo: a.title || a.name || b.title || b.name || '',
+    espana: c.title || c.name || '',
     ingles: b.title || b.name || '',
     original: a.original_title || a.original_name || b.original_title || b.original_name || '',
+    alternos,
     anio: String(a.release_date || a.first_air_date || b.release_date || b.first_air_date || '').slice(0, 4)
   };
 }
 
 function titulosPosibles(d) {
   const vistos = new Set();
-  return [d.titulo, d.ingles, d.original].filter((t) => {
+  return [d.titulo, d.espana, ...(d.alternos || []), d.ingles, d.original].filter((t) => {
     const n = normalizar(t);
     if (!n || vistos.has(n)) return false;
     vistos.add(n);
     return true;
-  });
+  }).slice(0, 5);
 }
 
 function encabezado(d, tipo, temporada, episodio) {
@@ -178,7 +189,10 @@ function resultados(html) {
     const url = absoluta(entidades(m[1]), `${BASE}/`);
     if (vistos.has(url)) continue;
     vistos.add(url);
-    lista.push({ nombre: limpiarHtml(m[2]), url });
+    // el año aparece justo después del título: </h2> &nbsp;&nbsp;2025 &nbsp; Historia
+    const cola = entidades(html.slice(patron.lastIndex, patron.lastIndex + 160).replace(/<[^>]+>/g, ' '));
+    const anio = (cola.match(/\b((?:19|20)\d{2})\b/) || [])[1] || '';
+    lista.push({ nombre: limpiarHtml(m[2]), url, anio });
   }
   return lista;
 }
@@ -188,10 +202,29 @@ async function buscarTitulo(titulo, trace) {
   for (const ruta of [`${BASE}/resultados.php?buscar=${consulta}`, `${BASE}/resultados/buscar=${encodeURIComponent(titulo)}/`]) {
     const html = await texto(ruta, {}, trace);
     const lista = resultados(html);
-    if (trace && html) trace.push(`  ↳ ${(html.length / 1024).toFixed(0)}KB, ${lista.length} resultado(s) reconocidos${lista.length ? ': ' + lista.slice(0, 4).map((x) => x.nombre).join(' | ') : ''}`);
-    if (lista.length) return lista;
+    if (trace && html) trace.push(`  ↳ ${(html.length / 1024).toFixed(0)}KB, ${lista.length} resultado(s) reconocidos${lista.length ? ': ' + lista.slice(0, 4).map((x) => `${x.nombre}${x.anio ? ` (${x.anio})` : ''}`).join(' | ') : ''}`);
+    if (lista.length || html) return lista; // el sitio respondió: no hace falta la ruta alterna
   }
   return [];
+}
+
+// El buscador del sitio es literal: "Perdidos en el Amazonas" no encuentra "Perdidos en la jungla".
+// Si el título completo no da nada, se buscan sus palabras clave sueltas.
+async function candidatos(titulo, trace) {
+  const lista = await buscarTitulo(titulo, trace);
+  if (lista.length) return lista;
+  const palabras = limpiarTitulo(titulo).split(' ').filter((p) => p.length >= 4 && !VACIAS.has(p)).sort((a, b) => b.length - a.length).slice(0, 2);
+  const vistos = new Set();
+  const todos = [];
+  for (const p of palabras) {
+    for (const r of await buscarTitulo(p, trace)) {
+      if (!vistos.has(r.url)) {
+        vistos.add(r.url);
+        todos.push(r);
+      }
+    }
+  }
+  return todos;
 }
 
 function episodioEn(lista, episodio) {
@@ -205,25 +238,37 @@ function episodioEn(lista, episodio) {
   return ep ? ep.url : null;
 }
 
-async function buscar(titulos, tipo, episodio, trace) {
+// Película: acepta coincidencia fuerte (>= 0.8) o, si el año coincide (±1), una parcial (>= 0.5).
+function mejorCoincidencia(lista, titulos, tipo, anio) {
+  let mejor = null;
+  let puntos = 0;
+  for (const r of lista) {
+    const nombre = r.nombre.replace(/\s*Ep\w*\.?\s*\d+.*$/i, '');
+    for (const t of titulos) {
+      let s = parecido(nombre, t);
+      const mismoAnio = tipo === 'movie' && anio && r.anio && Math.abs(Number(r.anio) - Number(anio)) <= 1;
+      if (mismoAnio && s >= 0.5) s = Math.max(s, 0.8); // año + parecido razonable
+      if (s > puntos) {
+        puntos = s;
+        mejor = r;
+      }
+    }
+  }
+  return { mejor, puntos };
+}
+
+async function buscar(titulos, tipo, episodio, anio, trace) {
   for (const titulo of titulos) {
     if (tipo === 'tv') {
       const directo = episodioEn(resultados(await texto(`${BASE}/resultados-serie.php?buscar=${encodeURIComponent(titulo)}&genero=`, {}, trace)), episodio);
       if (directo) return directo;
     }
-    let mejor = null;
-    let puntos = 0;
-    for (const r of await buscarTitulo(titulo, trace)) {
-      const s = parecido(r.nombre.replace(/\s*Ep\w*\.?\s*\d+.*$/i, ''), titulo);
-      if (s > puntos) {
-        puntos = s;
-        mejor = r.url;
-      }
-    }
-    if (trace) trace.push(`  ↳ mejor coincidencia para "${titulo}": ${mejor ? corta(mejor) : 'ninguna'} (puntaje ${puntos.toFixed(2)}, mínimo 0.80)`);
+    const lista = await candidatos(titulo, trace);
+    const { mejor, puntos } = mejorCoincidencia(lista, titulos, tipo, anio);
+    if (trace) trace.push(`  ↳ mejor coincidencia con "${titulo}": ${mejor ? `${mejor.nombre}${mejor.anio ? ` (${mejor.anio})` : ''}` : 'ninguna'} (puntaje ${puntos.toFixed(2)}, mínimo 0.80)`);
     if (!mejor || puntos < 0.8) continue;
-    if (tipo === 'movie') return mejor;
-    const ficha = await texto(mejor, {}, trace);
+    if (tipo === 'movie') return mejor.url;
+    const ficha = await texto(mejor.url, {}, trace);
     const serie = ficha.match(/href=["']([^"']*resultados-serie\.php\?buscar=([^"'&]+)[^"']*)["']/);
     if (!serie) continue;
     const ep = episodioEn(resultados(await texto(`${BASE}/resultados-serie.php?buscar=${encodeURIComponent(decodeURIComponent(serie[2]))}&genero=`, {}, trace)), episodio);
@@ -245,7 +290,7 @@ async function getStreams(id, mediaType, season, episode, trace) {
     const ep = Number(episode) || 1;
     const titulos = titulosPosibles(datos);
     if (trace) trace.push(`títulos: ${JSON.stringify(titulos)}`);
-    const pagina = await buscar(titulos, tipo, ep, trace);
+    const pagina = await buscar(titulos, tipo, ep, datos.anio, trace);
     if (!pagina) {
       if (trace) trace.push('sin coincidencia en el sitio');
       return [];
