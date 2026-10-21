@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: areadocumental-stremio
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      - key: SIGNING_KEY
+        generateValue: true
+      - key: NODE_VERSION
+        value: "20"
+      - key: ENABLE_DEBUG
+        value: "1"
+      # PUBLIC_URL es opcional: Render ya expone RENDER_EXTERNAL_URL
+      # TMDB_API_KEY es opcional (hay una clave por defecto en el plugin)
