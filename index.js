@@ -66,13 +66,24 @@ function aStream(x) {
 }
 
 builder.defineStreamHandler(async (args) => {
+  const t0 = Date.now();
+  console.log(`[stream] pedido ${args.type} ${args.id}`);
   const lista = await resolver(args.type, args.id);
+  console.log(`[stream] ${args.type} ${args.id} → ${lista.length} resultado(s) en ${Date.now() - t0}ms`);
   return { streams: lista.map(aStream) };
 });
 
 // ---- app
 const app = express();
 app.set('trust proxy', true);
+
+// registro de TODAS las peticiones (para ver en los logs de Render si Stremio llega)
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => console.log(`${req.method} ${req.originalUrl.slice(0, 100)} → ${res.statusCode} · ${Date.now() - t0}ms`));
+  next();
+});
+
 proxy.registrar(app);
 
 app.get('/health', (req, res) => res.send('ok'));
@@ -89,8 +100,8 @@ if (ENABLE_DEBUG) {
 
 app.use(getRouter(builder.getInterface()));
 
-app.listen(PORT, () => {
-  console.log(`AreaDocumental escuchando en el puerto ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`AreaDocumental escuchando en 0.0.0.0:${PORT} (debug=${ENABLE_DEBUG ? 'on' : 'off'})`);
   console.log(`URL pública: ${process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL}`);
   console.log(`Manifest: ${(process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '')}/manifest.json`);
 });
